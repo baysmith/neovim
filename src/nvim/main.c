@@ -293,6 +293,9 @@ int main(int argc, char **argv)
   nlua_init(argv, argc, params.lua_arg0);
   TIME_MSG("init lua interpreter");
 
+  nwasm_init(params.wasm_file);
+  TIME_MSG("init wasm interpreter");
+
   if (embedded_mode) {
     const char *err;
     if (!channel_from_stdio(true, CALLBACK_READER_INIT, &err)) {
@@ -1106,6 +1109,9 @@ static void command_line_scan(mparm_T *parmp)
           set_option_value_give_err("shadafile", 0L, "NONE", 0);
         } else if (STRNICMP(argv[0] + argv_idx, "luamod-dev", 9) == 0) {
           nlua_disable_preload = true;
+        } else if (STRNICMP(argv[0] + argv_idx, "wasm", 4) == 0) {
+          want_argument = true;
+          argv_idx += 4;
         } else {
           if (argv[0][argv_idx]) {
             mainerr(err_opt_unknown, argv[0]);
@@ -1323,6 +1329,9 @@ static void command_line_scan(mparm_T *parmp)
           } else if (strequal(argv[-1], "--server")) {
             // "--server {address}"
             parmp->server_addr = argv[0];
+          } else if (strequal(argv[-1], "--wasm")) {
+            // "--wasm {file}"
+            parmp->wasm_file = argv[0];
           }
           // "--startuptime <file>" already handled
           break;
@@ -1462,6 +1471,7 @@ static void init_params(mparm_T *paramp, int argc, char **argv)
   paramp->remote = 0;
   paramp->luaf = NULL;
   paramp->lua_arg0 = -1;
+  paramp->wasm_file = NULL;
 }
 
 /// Initialize global startuptime file if "--startuptime" passed as an argument.
@@ -2210,6 +2220,7 @@ static void usage(void)
   os_msg(_("  --remote[-subcommand] Execute commands remotely on a server\n"));
   os_msg(_("  --server <address>    Specify RPC server to send commands to\n"));
   os_msg(_("  --startuptime <file>  Write startup timing messages to <file>\n"));
+  os_msg(_("  --wasm <file>         Execute Wasm <file>\n"));
   os_msg(_("\nSee \":help startup-options\" for all options.\n"));
 }
 

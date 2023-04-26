@@ -258,6 +258,7 @@ set(GENERATOR_HASHY ${GENERATOR_DIR}/hashy.lua)
 set(API_METADATA ${PROJECT_BINARY_DIR}/api_metadata.mpack)
 set(FUNCS_DATA ${PROJECT_BINARY_DIR}/funcs_data.mpack)
 set(LUA_API_C_BINDINGS ${GENERATED_DIR}/lua_api_c_bindings.generated.c)
+set(WASM_API_C_BINDINGS ${GENERATED_DIR}/wasm_api_c_bindings.generated.c)
 set(HEADER_GENERATOR ${GENERATOR_DIR}/gen_declarations.lua)
 set(GENERATED_INCLUDES_DIR ${PROJECT_BINARY_DIR}/include)
 set(GENERATED_API_DISPATCH ${GENERATED_DIR}/api/private/dispatch_wrappers.generated.h)
@@ -315,8 +316,8 @@ file(MAKE_DIRECTORY ${GENERATED_INCLUDES_DIR})
 
 glob_wrapper(NVIM_SOURCES *.c)
 glob_wrapper(NVIM_HEADERS *.h)
-glob_wrapper(EXTERNAL_SOURCES ../xdiff/*.c ../mpack/*.c ../cjson/*.c ../klib/*.c)
-glob_wrapper(EXTERNAL_HEADERS ../xdiff/*.h ../mpack/*.h ../cjson/*.h ../klib/*.h)
+glob_wrapper(EXTERNAL_SOURCES ../xdiff/*.c ../mpack/*.c ../cjson/*.c ../klib/*.c ../wasm3/source/*.c)
+glob_wrapper(EXTERNAL_HEADERS ../xdiff/*.h ../mpack/*.h ../cjson/*.h ../klib/*.h ../wasm3/source/*.h)
 
 glob_wrapper(NLUA0_SOURCES ../mpack/*.c)
 
@@ -340,6 +341,7 @@ foreach(subdir
         lua
         viml
         viml/parser
+        wasm
        )
 
   file(MAKE_DIRECTORY ${GENERATED_DIR}/${subdir})
@@ -518,6 +520,7 @@ add_custom_command(
                          ${GENERATED_FUNCS_METADATA} ${API_METADATA}
                          ${LUA_API_C_BINDINGS}
                          ${GENERATED_KEYSETS_DEFS}
+                         ${WASM_API_C_BINDINGS}
                          ${API_HEADERS}
   DEPENDS
     ${LUA_GEN_DEPS}

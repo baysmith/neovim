@@ -2,7 +2,7 @@ local mpack = vim.mpack
 
 local hashy = require'generators.hashy'
 
-assert(#arg >= 5)
+assert(#arg >= 6)
 -- output h file with generated dispatch functions (dispatch_wrappers.generated.h)
 local dispatch_outputf = arg[1]
 -- output h file with packed metadata (funcs_metadata.generated.h)
@@ -11,6 +11,7 @@ local funcs_metadata_outputf = arg[2]
 local mpack_outputf = arg[3]
 local lua_c_bindings_outputf = arg[4] -- lua_api_c_bindings.generated.c
 local keysets_outputf = arg[5] -- keysets_defs.generated.h
+local wasm_c_bindings_outputf = arg[6] -- wasm_api_c_bindings.generated.c
 
 local functions = {}
 
@@ -77,7 +78,7 @@ local function add_keyset(val)
 end
 
 -- read each input file, parse and append to the api metadata
-for i = 6, #arg do
+for i = 7, #arg do
   local full_path = arg[i]
   local parts = {}
   for part in string.gmatch(full_path, '[^/]+') do
@@ -132,8 +133,9 @@ for _,f in ipairs(shallowcopy(functions)) do
       ismethod = true
     end
     f.remote = f.remote_only or not f.lua_only
-    f.lua = f.lua_only or not f.remote_only
-    f.eval = (not f.lua_only) and (not f.remote_only)
+    f.lua = f.lua_only or ((not f.remote_only) and (not f.wasm_only))
+    f.wasm = f.wasm_only or ((not f.lua_only) and (not f.remote_only))
+    f.eval = (not f.lua_only) and (not f.remote_only) and (not f.wasm_only)
   else
     f.deprecated_since = tonumber(f.deprecated_since)
     assert(f.deprecated_since == 1)
@@ -720,6 +722,206 @@ end
 output:write([[
 
   lua_setfield(lstate, -2, "api");
+}
+]])
+
+output:close()
+
+-- start building wasm output
+output = io.open(wasm_c_bindings_outputf, 'wb')
+
+output:write([[
+// This is an open source non-commercial project. Dear PVS-Studio, please check
+// it. PVS-Studio Static Code Analyzer for C, C++ and C#: http://www.viva64.com
+#include "wasm3/source/wasm3.h"
+
+#include "nvim/func_attr.h"
+#include "nvim/api/private/defs.h"
+#include "nvim/api/private/helpers.h"
+#include "nvim/api/private/dispatch.h"
+#include "nvim/wasm/converter.h"
+#include "nvim/wasm/executor.h"
+#include "nvim/memory.h"
+
+]])
+include_headers(output, headers)
+output:write('\n')
+
+local wasm_c_functions = {}
+
+local function process_function(fn)
+  local wasm_c_function_name = ('nwasm_api_%s'):format(fn.name)
+  local wasm_c_function_wrap_name = ('nwasm3_api_%s'):format(fn.name)
+  write_shifted_output(output, string.format([[
+  wasm_Function(%s, %s)
+  ]], wasm_c_function_wrap_name, wasm_c_function_name))
+  write_shifted_output(output, string.format([[
+  const void * %s(wasm_State *state)
+  {
+  ]], wasm_c_function_name))
+  wasm_c_functions[#wasm_c_functions + 1] = {
+    binding=wasm_c_function_name,
+    api=fn.name
+  }
+
+  if fn.check_textlock then
+    write_shifted_output(output, [[
+    if (textlock != 0) {
+      api_set_error(&err, kErrorTypeException, "%s", e_textlock);
+      goto exit_0;
+    }
+    ]])
+  end
+
+  if fn.return_type ~= 'void' then
+      write_shifted_output(output, string.format([[
+      m3ApiReturnType(%s)
+      ]], fn.return_type))
+  end
+
+  local cparams = ''
+  local free_code = {}
+  for j = #fn.parameters,1,-1 do
+
+    local param = fn.parameters[j]
+    local cparam = string.format('arg%u', j)
+    local param_type = real_type(param[1])
+    local lc_param_type = real_type(param[1]):lower()
+    local extra = param_type == "Dictionary" and "false, " or ""
+    if param[1] == "Object" or param[1] == "DictionaryOf(wasmRef)" then
+      extra = "true, "
+    end
+    local errshift = 0
+    if string.match(param_type, '^KeyDict_') then
+      write_shifted_output(output, string.format([[
+      %s %s = { 0 }; nwasm_pop_keydict(lstate, &%s, %s_get_field, %s&err);]], param_type, cparam, cparam, param_type, extra))
+      cparam = '&'..cparam
+      errshift = 1 -- free incomplete dict on error
+    else
+      write_shifted_output(output, string.format([[
+      const %s %s = nwasm_pop_%s(wstate, %s&err);]], param[1], cparam, param_type, extra))
+    end
+
+    write_shifted_output(output, string.format([[
+
+    if (ERROR_SET(&err)) {
+      goto exit_%u;
+    }
+
+    ]], #fn.parameters - j + errshift))
+    free_code[#free_code + 1] = ('api_free_%s(%s);'):format(
+      lc_param_type, cparam)
+    cparams = cparam .. ', ' .. cparams
+  end
+  if fn.receives_channel_id then
+    cparams = 'wasm_INTERNAL_CALL, ' .. cparams
+  end
+  if fn.arena_return then
+    cparams = cparams .. '&arena, '
+    write_shifted_output(output, [[
+    Arena arena = ARENA_EMPTY;
+    ]])
+  end
+
+  if fn.has_wasm_imp then
+    cparams = cparams .. 'lstate, '
+  end
+
+  if fn.can_fail then
+    cparams = cparams .. '&err'
+  else
+    cparams = cparams:gsub(', $', '')
+  end
+  local free_at_exit_code = ''
+  for i = 1, #free_code do
+    local rev_i = #free_code - i + 1
+    local code = free_code[rev_i]
+    if i == 1 and not string.match(real_type(fn.parameters[1][1]), '^KeyDict_') then
+      free_at_exit_code = free_at_exit_code .. ('\n    %s'):format(code)
+    else
+      free_at_exit_code = free_at_exit_code .. ('\n  exit_%u:\n    %s'):format(
+        rev_i, code)
+    end
+  end
+  local err_throw_code = [[
+
+  exit_0:
+    if (ERROR_SET(&err)) {
+      return err.msg;
+    }
+  ]]
+  local return_type
+  if fn.return_type ~= 'void' then
+    if fn.return_type:match('^ArrayOf') then
+      return_type = 'Array'
+    else
+      return_type = fn.return_type
+    end
+    local free_retval
+    if fn.arena_return then
+      free_retval = "arena_mem_free(arena_finish(&arena));"
+    else
+      free_retval = "api_free_"..return_type:lower().."(ret);"
+    end
+    write_shifted_output(output, string.format([[
+    const %s ret = %s(%s);
+    ]], fn.return_type, fn.name, cparams))
+
+    if fn.has_wasm_imp then
+      -- only push onto the wasm stack if we haven't already
+      write_shifted_output(output, string.format([[
+    if (wasm_gettop(lstate) == 0) {
+      nwasm_push_%s(lstate, ret, true);
+    }
+      ]], return_type))
+    else
+      local special = (fn.since ~= nil and fn.since < 11)
+      write_shifted_output(output, string.format([[
+    nwasm_push_%s(lstate, ret, %s);
+      ]], return_type, tostring(special)))
+    end
+
+    write_shifted_output(output, string.format([[
+  %s
+  %s
+  %s
+    return 1;
+    ]], free_retval, free_at_exit_code, err_throw_code))
+  else
+    write_shifted_output(output, string.format([[
+    %s(%s);
+  %s
+  %s
+    return 0;
+    ]], fn.name, cparams, free_at_exit_code, err_throw_code))
+  end
+  write_shifted_output(output, [[
+  }
+  ]])
+end
+
+for _, fn in ipairs(functions) do
+  if fn.lua or fn.name:sub(1, 4) == '_vim' then
+    process_function(fn)
+  end
+end
+
+output:write(string.format([[
+void nwasm_add_api_functions(wasm_State *lstate);  // silence -Wmissing-prototypes
+void nwasm_add_api_functions(wasm_State *lstate)
+  FUNC_ATTR_NONNULL_ALL
+{
+  wasm_createtable(lstate, 0, %u);
+]], #wasm_c_functions))
+for _, func in ipairs(wasm_c_functions) do
+  output:write(string.format([[
+
+  wasm_pushcfunction(lstate, &%s);
+  wasm_setfield(lstate, -2, "%s");]], func.binding, func.api))
+end
+output:write([[
+
+  wasm_setfield(lstate, -2, "api");
 }
 ]])
 

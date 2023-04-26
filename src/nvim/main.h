@@ -25,6 +25,7 @@ typedef struct {
   char *pre_commands[MAX_ARG_CMDS];     // commands from --cmd argument
   char *luaf;                           // Lua script filename from "-l"
   int lua_arg0;                         // Lua script args start index.
+  char *wasm_file;                      // --wasm {file}
 
   int edit_type;                        // type of editing to do
   char *tagname;                        // tag from -t argument
