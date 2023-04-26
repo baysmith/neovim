@@ -36,6 +36,7 @@
 #include "nvim/strings.h"
 #include "nvim/version.h"
 #include "nvim/vim.h"
+#include "nvim/wasm/executor.h"
 
 // for ":version", ":intro", and "nvim --version"
 #ifndef NVIM_VERSION_MEDIUM
@@ -2690,11 +2691,19 @@ void list_lua_version(void)
   api_free_object(ret);
 }
 
+void list_wasm_version(void)
+{
+  version_msg("\nwasm3 ");
+  version_msg(M3_VERSION);
+  version_msg("\n");
+}
+
 void list_version(void)
 {
   msg(longVersion);
   msg(version_buildtype);
   list_lua_version();
+  list_wasm_version();
 #ifndef NDEBUG
   msg(version_cflags);
 #endif
