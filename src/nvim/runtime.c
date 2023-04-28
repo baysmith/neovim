@@ -2134,7 +2134,13 @@ int do_source(char *fname, int check_other, int is_vimrc, int *ret_sid)
 
   cookie.conv.vc_type = CONV_NONE;              // no conversion
 
-  if (path_with_extension(fname_exp, "lua")) {
+  if (path_with_extension(fname_exp, "wasm")) {
+    const sctx_T current_sctx_backup = current_sctx;
+    current_sctx.sc_sid = SID_WASM;
+    current_sctx.sc_lnum = 0;
+    nwasm_exec_file(fname_exp);
+    current_sctx = current_sctx_backup;
+  } else if (path_with_extension(fname_exp, "lua")) {
     const sctx_T current_sctx_backup = current_sctx;
     current_sctx.sc_sid = SID_LUA;
     current_sctx.sc_lnum = 0;

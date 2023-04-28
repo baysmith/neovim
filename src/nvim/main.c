@@ -1980,8 +1980,28 @@ static bool do_user_initialization(void)
     return do_exrc;
   }
 
+  char *init_wasm_path = stdpaths_user_conf_subpath("init.wasm");
   char *init_lua_path = stdpaths_user_conf_subpath("init.lua");
   char *user_vimrc = stdpaths_user_conf_subpath("init.vim");
+
+  // init.wasm
+  if (os_path_exists(init_wasm_path)
+      && do_source(init_wasm_path, true, DOSO_VIMRC, NULL)) {
+    if (os_path_exists(init_lua_path)) {
+      semsg(_("E5422: Conflicting configs: \"%s\" \"%s\""), init_wasm_path,
+            init_lua_path);
+    }
+    if (os_path_exists(user_vimrc)) {
+      semsg(_("E5422: Conflicting configs: \"%s\" \"%s\""), init_wasm_path,
+            user_vimrc);
+    }
+    xfree(user_vimrc);
+    xfree(init_lua_path);
+    xfree(init_wasm_path);
+    do_exrc = p_exrc;
+    return do_exrc;
+  }
+  xfree(init_wasm_path);
 
   // init.lua
   if (os_path_exists(init_lua_path)
@@ -1993,6 +2013,7 @@ static bool do_user_initialization(void)
 
     xfree(user_vimrc);
     xfree(init_lua_path);
+    xfree(init_wasm_path);
     do_exrc = p_exrc;
     return do_exrc;
   }

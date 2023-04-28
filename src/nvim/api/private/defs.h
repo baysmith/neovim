@@ -48,6 +48,9 @@ typedef enum {
 /// Internal call from lua code
 #define LUA_INTERNAL_CALL (VIML_INTERNAL_CALL + 1)
 
+/// Internal call from wasm code
+#define WASM_INTERNAL_CALL (VIML_INTERNAL_CALL + 2)
+
 static inline bool is_internal_call(uint64_t channel_id)
   REAL_FATTR_ALWAYS_INLINE REAL_FATTR_CONST;
 

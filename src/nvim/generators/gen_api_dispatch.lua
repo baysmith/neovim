@@ -161,6 +161,7 @@ for _,f in ipairs(shallowcopy(functions)) do
     end
     newf.impl_name = f.name
     newf.lua = false
+    newf.wasm = false
     newf.eval = false
     newf.since = 0
     newf.deprecated_since = 1
@@ -742,46 +743,110 @@ output:write([[
 #include "nvim/wasm/converter.h"
 #include "nvim/wasm/executor.h"
 #include "nvim/memory.h"
-
 ]])
 include_headers(output, headers)
 output:write('\n')
+output:write('\n')
+
+local function dump(o)
+   if type(o) == 'table' then
+      local s = '{ '
+      for k,v in pairs(o) do
+         if type(k) ~= 'number' then k = '"'..k..'"' end
+         s = s .. '['..k..'] = ' .. dump(v) .. ','
+      end
+      return s .. '} '
+   else
+      return tostring(o)
+   end
+end
 
 local wasm_c_functions = {}
 
-local function process_function(fn)
+local function wasm_type_signature(t)
+  if t == 'void' then
+    return 'v'
+  elseif t == 'Integer' then
+    return 'i'
+  elseif t == 'Boolean' then
+    return 'i'
+  elseif t == 'Float' then
+    return 'f'
+  -- elseif t == 'double' then
+    -- return 'F'
+  elseif t == 'String' then
+    return 'i*'
+  elseif t == 'Object' then
+    return '*'
+  elseif t == 'Buffer' then
+    return '*'
+  elseif t == 'Window' then
+    return '*'
+  elseif t == 'Tabpage' then
+    return '*'
+  elseif t == 'Array' then
+    return '*'
+  elseif t == 'Dictionary' then
+    return '*'
+  elseif t == 'LuaRef' then
+    return 'i'
+  elseif string.match(t, '^ArrayOf') then
+    return '*'
+  elseif string.match(t, '^KeyDict_') then
+    return '*'
+  else
+      print("Type "..dump(t).." not recognized.\n")
+      os.exit(1)
+  end
+end
+
+local function wasm_function_signature(fn)
+  print("fn ", dump(fn))
+  local signature = ""
+  signature = signature .. wasm_type_signature(fn.return_type)
+  signature = signature .. '('
+  for j = 1,#fn.parameters,1 do
+    local param = fn.parameters[j]
+    print("param ", dump(param))
+    print("param real ", dump(real_type(param[1])))
+    signature = signature .. wasm_type_signature(real_type(param[1]))
+  end
+  signature = signature .. ')'
+  return signature
+end
+
+local function wasm_process_function(fn)
   local wasm_c_function_name = ('nwasm_api_%s'):format(fn.name)
-  local wasm_c_function_wrap_name = ('nwasm3_api_%s'):format(fn.name)
   write_shifted_output(output, string.format([[
-  wasm_Function(%s, %s)
-  ]], wasm_c_function_wrap_name, wasm_c_function_name))
-  write_shifted_output(output, string.format([[
-  const void * %s(wasm_State *state)
+  m3ApiRawFunction(%s);
+  m3ApiRawFunction(%s)
   {
-  ]], wasm_c_function_name))
+  ]], wasm_c_function_name, wasm_c_function_name))
   wasm_c_functions[#wasm_c_functions + 1] = {
     binding=wasm_c_function_name,
-    api=fn.name
+    api=fn.name,
+    signature=wasm_function_signature(fn),
   }
 
-  if fn.check_textlock then
-    write_shifted_output(output, [[
-    if (textlock != 0) {
-      api_set_error(&err, kErrorTypeException, "%s", e_textlock);
-      goto exit_0;
-    }
-    ]])
-  end
-
   if fn.return_type ~= 'void' then
+    if fn.can_fail then
       write_shifted_output(output, string.format([[
-      m3ApiReturnType(%s)
-      ]], fn.return_type))
+    m3ApiMultiValueReturnType(int32_t, ret_err);
+    m3ApiMultiValueReturnType(%s, ret);
+      ]], fn.return_type, fn.return_type))
+    else
+      write_shifted_output(output, string.format([[
+    m3ApiMultiValueReturnType(%s, ret);
+      ]], fn.return_type, fn.return_type))
+    end
   end
 
-  local cparams = ''
+  local cparams = {}
+  if fn.receives_channel_id then
+    cparams[#cparams + 1] = "WASM_INTERNAL_CALL"
+  end
   local free_code = {}
-  for j = #fn.parameters,1,-1 do
+  for j = 1,#fn.parameters,1 do
 
     local param = fn.parameters[j]
     local cparam = string.format('arg%u', j)
@@ -792,45 +857,29 @@ local function process_function(fn)
       extra = "true, "
     end
     local errshift = 0
-    if string.match(param_type, '^KeyDict_') then
-      write_shifted_output(output, string.format([[
-      %s %s = { 0 }; nwasm_pop_keydict(lstate, &%s, %s_get_field, %s&err);]], param_type, cparam, cparam, param_type, extra))
-      cparam = '&'..cparam
-      errshift = 1 -- free incomplete dict on error
-    else
-      write_shifted_output(output, string.format([[
-      const %s %s = nwasm_pop_%s(wstate, %s&err);]], param[1], cparam, param_type, extra))
-    end
-
     write_shifted_output(output, string.format([[
-
-    if (ERROR_SET(&err)) {
-      goto exit_%u;
-    }
-
-    ]], #fn.parameters - j + errshift))
-    free_code[#free_code + 1] = ('api_free_%s(%s);'):format(
-      lc_param_type, cparam)
-    cparams = cparam .. ', ' .. cparams
+    m3ApiGetArg(%s, %s);
+    ]], param[1], cparam))
+    cparams[#cparams + 1] = cparam
   end
-  if fn.receives_channel_id then
-    cparams = 'wasm_INTERNAL_CALL, ' .. cparams
+  if fn.can_fail then
+    write_shifted_output(output, string.format([[
+    Error err = ERROR_INIT;
+    ]]))
   end
   if fn.arena_return then
-    cparams = cparams .. '&arena, '
+    cparams[#cparams + 1] = '&arena'
     write_shifted_output(output, [[
     Arena arena = ARENA_EMPTY;
     ]])
   end
 
   if fn.has_wasm_imp then
-    cparams = cparams .. 'lstate, '
+    cparams[#cparams + 1] = 'state'
   end
 
   if fn.can_fail then
-    cparams = cparams .. '&err'
-  else
-    cparams = cparams:gsub(', $', '')
+    cparams[#cparams + 1] = '&err'
   end
   local free_at_exit_code = ''
   for i = 1, #free_code do
@@ -843,87 +892,68 @@ local function process_function(fn)
         rev_i, code)
     end
   end
-  local err_throw_code = [[
+  local params = ''
+  if #cparams > 0 then
+    params = cparams[1]
+    for i = 2, #cparams do
+      params = params .. ', ' .. cparams[i]
+    end
+  end
 
-  exit_0:
-    if (ERROR_SET(&err)) {
-      return err.msg;
-    }
-  ]]
-  local return_type
   if fn.return_type ~= 'void' then
-    if fn.return_type:match('^ArrayOf') then
-      return_type = 'Array'
-    else
-      return_type = fn.return_type
-    end
-    local free_retval
-    if fn.arena_return then
-      free_retval = "arena_mem_free(arena_finish(&arena));"
-    else
-      free_retval = "api_free_"..return_type:lower().."(ret);"
-    end
+    local free_arena = ""
     write_shifted_output(output, string.format([[
-    const %s ret = %s(%s);
-    ]], fn.return_type, fn.name, cparams))
-
-    if fn.has_wasm_imp then
-      -- only push onto the wasm stack if we haven't already
-      write_shifted_output(output, string.format([[
-    if (wasm_gettop(lstate) == 0) {
-      nwasm_push_%s(lstate, ret, true);
-    }
-      ]], return_type))
-    else
-      local special = (fn.since ~= nil and fn.since < 11)
-      write_shifted_output(output, string.format([[
-    nwasm_push_%s(lstate, ret, %s);
-      ]], return_type, tostring(special)))
-    end
-
-    write_shifted_output(output, string.format([[
-  %s
-  %s
-  %s
-    return 1;
-    ]], free_retval, free_at_exit_code, err_throw_code))
+    *ret = %s(%s);
+    ]], fn.name, params))
   else
     write_shifted_output(output, string.format([[
     %s(%s);
-  %s
-  %s
-    return 0;
-    ]], fn.name, cparams, free_at_exit_code, err_throw_code))
+    ]], fn.name, params))
+  end
+  if fn.arena_return then
+    write_shifted_output(output, string.format([[
+    arena_mem_free(arena_finish(&arena));
+    ]]))
+  end
+  if fn.return_type ~= 'void' then
+    if fn.can_fail then
+      write_shifted_output(output, string.format([[
+    if (ERROR_SET(&err)) {
+      *ret_err = true;
+    } else {
+      *ret_err = false;
+    }
+    ]], fn.return_type))
+    end
   end
   write_shifted_output(output, [[
+    return m3Err_none;
   }
   ]])
 end
 
 for _, fn in ipairs(functions) do
-  if fn.lua or fn.name:sub(1, 4) == '_vim' then
-    process_function(fn)
+  if fn.wasm or fn.name:sub(1, 4) == '_vim' then
+    if not fn.has_lua_imp then
+      wasm_process_function(fn)
+    end
   end
 end
 
 output:write(string.format([[
-void nwasm_add_api_functions(wasm_State *lstate);  // silence -Wmissing-prototypes
-void nwasm_add_api_functions(wasm_State *lstate)
-  FUNC_ATTR_NONNULL_ALL
+void nwasm_add_api_functions(wasm_State *state, IM3Module module);  // silence -Wmissing-prototypes
+void nwasm_add_api_functions(wasm_State *state, IM3Module module)
 {
-  wasm_createtable(lstate, 0, %u);
 ]], #wasm_c_functions))
 for _, func in ipairs(wasm_c_functions) do
   output:write(string.format([[
-
-  wasm_pushcfunction(lstate, &%s);
-  wasm_setfield(lstate, -2, "%s");]], func.binding, func.api))
+  m3_LinkRawFunction(module, "nvim_api", "%s", "%s", %s);
+]], func.api, func.signature, func.binding))
 end
 output:write([[
-
-  wasm_setfield(lstate, -2, "api");
 }
 ]])
 
 output:close()
+
 keysets_defs:close()
