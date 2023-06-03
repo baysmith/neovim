@@ -767,7 +767,7 @@ local function wasm_type_signature(t)
   if t == 'void' then
     return 'v'
   elseif t == 'Integer' then
-    return 'i'
+    return 'I'
   elseif t == 'Boolean' then
     return 'i'
   elseif t == 'Float' then
@@ -775,25 +775,25 @@ local function wasm_type_signature(t)
   -- elseif t == 'double' then
     -- return 'F'
   elseif t == 'String' then
-    return 'i*'
+    return '*i'
   elseif t == 'Object' then
-    return '*'
+    return 'i'
   elseif t == 'Buffer' then
-    return '*'
+    return 'i'
   elseif t == 'Window' then
-    return '*'
+    return 'i'
   elseif t == 'Tabpage' then
-    return '*'
+    return 'i'
   elseif t == 'Array' then
-    return '*'
+    return 'i'
   elseif t == 'Dictionary' then
-    return '*'
+    return 'i'
   elseif t == 'LuaRef' then
     return 'i'
   elseif string.match(t, '^ArrayOf') then
-    return '*'
+    return 'i'
   elseif string.match(t, '^KeyDict_') then
-    return '*'
+    return 'i'
   else
       print("Type "..dump(t).." not recognized.\n")
       os.exit(1)
@@ -857,9 +857,17 @@ local function wasm_process_function(fn)
       extra = "true, "
     end
     local errshift = 0
-    write_shifted_output(output, string.format([[
+    if param[1] == "String" then
+      write_shifted_output(output, string.format([[
+    m3ApiGetArgMem(char*, str_%s);
+    m3ApiGetArg(int32_t, len_%s);
+    String %s = { str_%s, len_%s };
+]], cparam, cparam, cparam, cparam, cparam))
+    else
+      write_shifted_output(output, string.format([[
     m3ApiGetArg(%s, %s);
-    ]], param[1], cparam))
+]], param[1], cparam))
+    end
     cparams[#cparams + 1] = cparam
   end
   if fn.can_fail then

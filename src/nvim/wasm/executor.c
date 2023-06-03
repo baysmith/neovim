@@ -31,8 +31,118 @@ void nwasm_init(char* wasm_file)
   kv_init(modules);
 
   if (wasm_file) {
+    smsg(_("Wasm exec file: \"%s\""), wasm_file);
     nwasm_exec_file(wasm_file);
   }
+}
+
+static void nwasm_print_event(void **argv)
+{
+  char *str = argv[0];
+  const size_t len = (size_t)(intptr_t)argv[1] - 1;  // exclude final NUL
+
+  for (size_t i = 0; i < len;) {
+    if (got_int) {
+      break;
+    }
+    const size_t start = i;
+    while (i < len) {
+      switch (str[i]) {
+      case NUL:
+        str[i] = NL;
+        i++;
+        continue;
+      case NL:
+        // TODO(baysmith): use proper multiline msg? Probably should implement
+        // print() in nwasm in terms of nvim_message(), when it is available.
+        str[i] = NUL;
+        i++;
+        break;
+      default:
+        i++;
+        continue;
+      }
+      break;
+    }
+    msg(str + start);
+  }
+  if (len && str[len - 1] == NUL) {  // Last was newline
+    msg("");
+  }
+  xfree(str);
+}
+
+typedef struct
+{
+    uint32_t buf;
+    uint32_t buf_len;
+} wasm_strings;
+
+m3ApiRawFunction(nwasm_print_strings)
+{
+  m3ApiGetArgMem(wasm_strings*, strs);
+  m3ApiGetArg(uint32_t, strs_len);
+
+  garray_T msg_ga;
+  ga_init(&msg_ga, 1, 80);
+
+  ssize_t res = 0;
+  for (uint32_t i = 0; i < strs_len; ++i) {
+    void* str = m3ApiOffsetToPtr(m3ApiReadMem32(&strs[i].buf));
+    size_t len = m3ApiReadMem32(&strs[i].buf_len);
+    if (len == 0) continue;
+    m3ApiCheckMem(str, len);
+    ga_concat_len(&msg_ga, str, len);
+    if (i > 0) {
+      ga_append(&msg_ga, ' ');
+    }
+  }
+  ga_append(&msg_ga, NUL);
+  nwasm_print_event((void *[]){ msg_ga.ga_data,
+    (void *)(intptr_t)msg_ga.ga_len });
+
+  m3ApiSuccess();
+}
+
+m3ApiRawFunction(nwasm_print)
+{
+  m3ApiGetArgMem(char*, str);
+  m3ApiGetArg(uint32_t, str_len);
+  char* s = xmallocz(str_len + 1);
+  memcpy(s, str, str_len);
+  s[str_len] = '\0';
+  msg(s);
+  xfree(s);
+  m3ApiSuccess();
+}
+
+
+m3ApiRawFunction(bas_msg)
+{
+  m3ApiGetArgMem(char*, str);
+  m3ApiGetArg(int32_t, str_len);
+  if (str_len > 0) {
+    char* c_str = malloc(str_len + 1);
+    memcpy(c_str, str, str_len);
+    c_str[str_len] = '\0';
+    printf("%s\n", c_str);
+    free(c_str);
+    m3ApiSuccess();
+  }
+  fprintf(stderr, "invalid str_len\n");
+  exit(1);
+}
+
+m3ApiRawFunction(nwasm_semsg);
+m3ApiRawFunction(nwasm_semsg)
+{
+  m3ApiGetArgMem(char*, str);
+  m3ApiGetArg(int32_t, str_len);
+  char* msg = xmallocz(str_len + 1);
+  memcpy(msg, str, str_len);
+  semsg(_("E?: %s"), msg);
+  xfree(msg);
+  return m3Err_none;
 }
 
 bool nwasm_exec_file(const char *path)
@@ -65,22 +175,33 @@ bool nwasm_exec_file(const char *path)
       semsg(_("E?: Error when closing file %s: %s"), path, os_strerror(error));
     }
 
+    smsg(_("Wasm parsing module"));
     M3Result result = m3Err_none;
     result = m3_ParseModule(global_wstate.env, &module->module, module->bytes, module->bytes_size);
     if (result) {
+      semsg(_("E?: Error parsing wasm module %s: %s"), path, result);
       os_errmsg(result);
       return false;
     }
-    nwasm_add_api_functions(&global_wstate, module->module);
     result = m3_LoadModule(global_wstate.runtime, module->module);
     if (result) {
+      semsg(_("E?: Error loading wasm module %s: %s"), path, result);
       os_errmsg(result);
       return false;
     }
 
+    m3_LinkRawFunction(module->module, "nvim_api", "print", "v(*i)", nwasm_print);
+    m3_LinkRawFunction(module->module, "nvim_api", "print_strings", "v(*i)", nwasm_print_strings);
+    m3_LinkRawFunction(module->module, "bas", "msg", "v(*i)", bas_msg);
+    m3_LinkRawFunction(module->module, "nvim_api", "nvim_semsg", "v(*i)", nwasm_semsg);
+    smsg(_("Wasm linked nvim_semsg function"));
+    smsg("");
+    /* nwasm_add_api_functions(&global_wstate, module->module); */
+
     IM3Function start;
-    result = m3_FindFunction(&start, global_wstate.runtime, "start");
+    result = m3_FindFunction(&start, global_wstate.runtime, "_start");
     if (result) {
+      semsg(_("E?: Error loading finding _start function %s: %s"), path, result);
       os_errmsg(result);
       return false;
     }
@@ -100,33 +221,8 @@ bool nwasm_exec_file(const char *path)
     }
 
     printf("Result: %d, %d\n", value, value2);
-
-    IM3Function ret_str;
-    result = m3_FindFunction(&ret_str, global_wstate.runtime, "ret_str_2");
-    if (result) {
-      os_errmsg(result);
-      return false;
-    }
-
-    result = m3_CallV(ret_str);
-    if (result) {
-      os_errmsg(result);
-      return false;
-    }
-
-    uint32_t ref = 0;
-    uint32_t len = 0;
-    result = m3_GetResultsV(ret_str, &ref, &len);
-    if (result) {
-      os_errmsg(result);
-      return false;
-    }
-
-    uint32_t mem_len;
-    uint8_t* mem = m3_GetMemory(global_wstate.runtime, &mem_len, 0);
-
-    printf("Result: %d, %s\n", len, (char*)(mem + ref));
   }
+  printf("nwasm_exec_file done\n");
   return true;
 }
 
